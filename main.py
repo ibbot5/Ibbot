@@ -11,7 +11,7 @@ SYMBOLS = {
     'XAUUSD': 'GC=F'
 }
 
-def telegram_send(chat_id, message):
+def telegram_send(6716644289):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = urllib.parse.urlencode({'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'}).encode()
     req = urllib.request.Request(url, data=data)
