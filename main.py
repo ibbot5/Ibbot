@@ -13,7 +13,7 @@ def keep_alive():
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"IB BOT V3 Candlestick is running")
+            self.wfile.write(b"IB BOT V3 FINAL is running")
         def log_message(self, *a):
             pass
     try:
@@ -23,7 +23,8 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-BOT_TOKEN = "9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
+BOT_TOKEN = "
+9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
 CHAT_ID = "6716644289"
 
 SYMBOLS = {
@@ -47,6 +48,17 @@ def display_name(sym):
     if sym == 'AEDCNY_OTC':
         return 'AED/CNY OTC'
     return f"{sym[:3]}/{sym[3:]}"
+
+def tf_label(tf):
+    if tf == "5m":
+        return "5min"
+    if tf == "1m":
+        return "1min"
+    if tf == "30m":
+        return "30min"
+    if tf == "1h":
+        return "1 Hour"
+    return tf
 
 def telegram_send(chat_id, message, buttons=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -106,8 +118,6 @@ def calc_rsi(closes, period=14):
 
 # ============ CANDLESTICK STRATEGY ============
 def detect_pattern(df):
-    # Use last 3 closed candles: -4, -3, -2 ( -1 is live )
-    # c2 = 2 candles ago, c1 = 1 candle ago (last closed), c0 = current closed we trade
     try:
         o2, c2, h2, l2 = float(df['Open'].iloc[-4]), float(df['Close'].iloc[-4]), float(df['High'].iloc[-4]), float(df['Low'].iloc[-4])
         o1, c1, h1, l1 = float(df['Open'].iloc[-3]), float(df['Close'].iloc[-3]), float(df['High'].iloc[-3]), float(df['Low'].iloc[-3])
@@ -132,49 +142,46 @@ def detect_pattern(df):
         lower_wick = min(o,c) - l
         return upper_wick > body(o,c)*2 and upper_wick > rng*0.55 and lower_wick < body(o,c)*0.5
 
-    # Doji = WAIT
     if is_doji(o0,c0,h0,l0):
         return "Doji - Confused", "WAIT"
-
-    # Morning Star: red, small, green big
     if is_red(o2,c2) and body(o1,c1) < body(o2,c2)*0.4 and is_green(o0,c0) and c0 > (o2+c2)/2:
         return "Morning Star ⭐", "BUY"
-    # Evening Star: green, small, red big
     if is_green(o2,c2) and body(o1,c1) < body(o2,c2)*0.4 and is_red(o0,c0) and c0 < (o2+c2)/2:
         return "Evening Star ⭐", "SELL"
-
-    # Bullish Engulfing
     if is_red(o1,c1) and is_green(o0,c0) and c0 > o1 and o0 < c1:
         return "Bullish Engulfing 🟢", "BUY"
-    # Bearish Engulfing
     if is_green(o1,c1) and is_red(o0,c0) and c0 < o1 and o0 > c1:
         return "Bearish Engulfing 🔴", "SELL"
-
-    # Hammer = BUY at bottom
     if is_hammer(o0,c0,h0,l0) and is_red(o1,c1):
         return "Hammer 🔨", "BUY"
-    # Shooting Star = SELL at top
     if is_shooting(o0,c0,h0,l0) and is_green(o1,c1):
         return "Shooting Star / Pin Bar Top 📌", "SELL"
-    # Pin Bar Bottom (hammer-like but green)
     if is_hammer(o0,c0,h0,l0) and is_green(o0,c0):
         return "Pin Bar Bottom 📌", "BUY"
-    # Pin Bar Top (shooting-like but red)
     if is_shooting(o0,c0,h0,l0) and is_red(o0,c0):
         return "Pin Bar Top 📌", "SELL"
-
-    # 3 Soldiers / 3 Crows
     if is_green(o2,c2) and is_green(o1,c1) and is_green(o0,c0):
         return "3 Green - Too Late", "WAIT"
     if is_red(o2,c2) and is_red(o1,c1) and is_red(o0,c0):
         return "3 Red - Too Late", "WAIT"
-
     return "No Pattern - Pullback Only", "PULLBACK"
 
 def check_pair(symbol, yahoo_symbol, timeframe="5m"):
     try:
-        period = "1d"
-        interval = "5m" if timeframe == "5m" else "1m"
+        # Period + Interval for ALL timeframes
+        if timeframe == "1h":
+            period = "5d"
+            interval = "1h"
+        elif timeframe == "30m":
+            period = "5d"
+            interval = "30m"
+        elif timeframe == "5m":
+            period = "1d"
+            interval = "5m"
+        else: # 1m
+            period = "1d"
+            interval = "1m"
+
         df = yf.download(yahoo_symbol, period=period, interval=interval, progress=False)
         if df is None or len(df) < 70:
             return (symbol, "FLAT", f"{display_name(symbol)}: No data", "LOW")
@@ -199,12 +206,11 @@ def check_pair(symbol, yahoo_symbol, timeframe="5m"):
         last3 = [candle_color(float(df['Open'].iloc[-2-i]), float(df['Close'].iloc[-2-i])) for i in range(3)]
         last5 = [candle_color(float(df['Open'].iloc[-2-i]), float(df['Close'].iloc[-2-i])) for i in range(5)]
 
-        label = "5min" if timeframe == "5m" else "1min"
+        label = tf_label(timeframe)
         name = display_name(symbol)
         is_otc = "_OTC" in symbol
         otc_note = "\n⚠️ OTC Proxy - Check Quotex chart" if is_otc else ""
 
-        # FILTERS
         if pattern_dir == "WAIT":
             return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nPattern: {pattern_name}\nRSI: {rsi:.0f} ❌\nDon't trade - {pattern_name}{otc_note}", "LOW")
         if last3[0] == last3[1] == last3[2] and pattern_dir == "PULLBACK":
@@ -215,7 +221,6 @@ def check_pair(symbol, yahoo_symbol, timeframe="5m"):
         if dist > 0.35:
             return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nReason: Too far from MA50 ({dist:.2f}%) ❌\nRSI: {rsi:.0f}{otc_note}", "LOW")
 
-        # BUY: Above MA + RSI + Pattern BUY or Pullback
         if curr_close > curr_ma and ma_now > ma_before:
             pullback_ok = prev_close < prev_open
             if rsi > 45 and (pattern_dir == "BUY" or (pattern_dir == "PULLBACK" and pullback_ok)):
@@ -223,7 +228,6 @@ def check_pair(symbol, yahoo_symbol, timeframe="5m"):
                 return (symbol, "UP", f"⬆️ <b>{name} : UP - {label}</b>\n\nPrice: {curr_close:.5f}\nAbove MA50, MA UP\nPattern: {pattern_name}\nRSI: {rsi:.0f}\nConfidence: {conf} ✅{otc_note}\n\nTake BUY for {label} ✅", conf)
             return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nReason: Above MA50 but Pattern: {pattern_name} / RSI {rsi:.0f} ❌{otc_note}", "LOW")
 
-        # SELL: Below MA + RSI + Pattern SELL or Pullback
         if curr_close < curr_ma and ma_now < ma_before:
             pullback_ok = prev_close > prev_open
             if rsi < 55 and (pattern_dir == "SELL" or (pattern_dir == "PULLBACK" and pullback_ok)):
@@ -237,7 +241,7 @@ def check_pair(symbol, yahoo_symbol, timeframe="5m"):
         return (symbol, "ERROR", f"{display_name(symbol)}: Error", "LOW")
 
 def timeframe_buttons():
-    return [("✅ 5min", "TF_5m"), ("1min", "TF_1m")]
+    return [("✅ 5min", "TF_5m"), ("1min", "TF_1m"), ("30min 🕧", "TF_30m"), ("1 Hour 🕐", "TF_1h")]
 
 def pair_buttons(timeframe):
     btns = []
@@ -249,16 +253,16 @@ def pair_buttons(timeframe):
     return btns
 
 def send_timeframe_menu(chat_id):
-    msg = "<b>🔥 Welcome to IB BOT V3 🕯️</b>\n\n<b>MA50 + RSI + Candlestick Patterns</b>\n\nChoose your minutes 👇\n\n<b>We recommend 5min</b> - slower and safer."
+    msg = "<b>🔥 Welcome to IB BOT V3 FINAL 🕯️</b>\n\n<b>MA50 + RSI + Candlestick + OTC</b>\n\nChoose your minutes 👇\n\n<b>We recommend 5min</b> - slower and safer."
     telegram_send(chat_id, msg, buttons=timeframe_buttons())
 
 def send_pair_menu(chat_id, timeframe):
-    label = "5min" if timeframe == "5m" else "1min"
+    label = tf_label(timeframe)
     msg = f"<b>⏰ Time: {label} ✅</b>\n\nChoose a pair below 👇"
     telegram_send(chat_id, msg, buttons=pair_buttons(timeframe))
 
-print("IB BOT V3 Candlestick - Running...")
-telegram_send(CHAT_ID, "✅ <b>IB BOT V3 Started - Candlestick Strategy</b>\nSend /start to see buttons.")
+print("IB BOT V3 FINAL - Running...")
+telegram_send(CHAT_ID, "✅ <b>IB BOT V3 FINAL Started</b>\nSend /start to see buttons.")
 offset = None
 
 while True:
@@ -274,11 +278,15 @@ while True:
                 send_pair_menu(chat_id, "5m")
             elif data == "TF_1m":
                 send_pair_menu(chat_id, "1m")
+            elif data == "TF_30m":
+                send_pair_menu(chat_id, "30m")
+            elif data == "TF_1h":
+                send_pair_menu(chat_id, "1h")
             elif data == "BACK_TF":
                 send_timeframe_menu(chat_id)
             elif data.endswith("_ALL"):
                 tf = data.split("_")[0]
-                label = "5min" if tf == "5m" else "1min"
+                label = tf_label(tf)
                 results = []
                 for s, y in SYMBOLS.items():
                     _, status, txt, _ = check_pair(s, y, tf)
@@ -292,7 +300,7 @@ while True:
                 telegram_send(chat_id, reply, buttons=pair_buttons(tf))
             elif data.endswith("_STRONG"):
                 tf = data.split("_")[0]
-                label = "5min" if tf == "5m" else "1min"
+                label = tf_label(tf)
                 strong = []
                 for s, y in SYMBOLS.items():
                     _, status, result, conf = check_pair(s, y, tf)
@@ -303,7 +311,7 @@ while True:
                 else:
                     reply = f"<b>⚪ No Strong Signal - {label}</b>\n\nAll pairs are WAIT. Don't trade now.\n\nChoose again 👇"
                 telegram_send(chat_id, reply, buttons=pair_buttons(tf))
-            elif "_" in data and data.split("_")[0] in ["5m", "1m"]:
+            elif "_" in data and data.split("_")[0] in ["5m", "1m", "30m", "1h"]:
                 parts = data.split("_", 1)
                 tf = parts[0]
                 sym = parts[1]
