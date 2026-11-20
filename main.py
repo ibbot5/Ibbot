@@ -26,8 +26,7 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-BOT_TOKEN = "
-9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
+BOT_TOKEN = "9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
 CHAT_ID = "6716644289"
 
 print("BOT_TOKEN set?", "YES" if BOT_TOKEN != "PASTE_YOUR_BOT_TOKEN_HERE" and len(BOT_TOKEN) > 10 else "NO - PLEASE PASTE REAL TOKEN", flush=True)
