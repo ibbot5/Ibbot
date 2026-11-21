@@ -11,8 +11,7 @@ import pandas as pd
 import numpy as np
 
 # ============ PUT YOUR TOKEN AND ID HERE ============
-BOT_TOKEN = "
-9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"  # <-- Paste token from @BotFather here
+BOT_TOKEN = "9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"  # <-- Paste token from @BotFather here
 MY_CHAT_ID = "6716644289"  # <-- Paste your ID number here, e.g. "123456789"
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
