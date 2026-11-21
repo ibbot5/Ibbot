@@ -1,340 +1,309 @@
-import yfinance as yf
-import urllib.parse
-import urllib.request
-import json
-import time
 import os
-import sys
-import traceback
+import time
+import json
+import urllib.request
+import urllib.parse
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import datetime
+import yfinance as yf
+import pandas as pd
+import numpy as np
 
-def keep_alive():
-    port = int(os.environ.get("PORT", 10000))
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"IB BOT V3.1 FIXED is running")
-        def log_message(self, *a):
-            pass
-    try:
-        print(f"Starting web server on port {port}", flush=True)
-        HTTPServer(("0.0.0.0", port), H).serve_forever()
-    except Exception as e:
-        print(f"Web server error: {e}", flush=True)
+# ============ CONFIG ============
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-threading.Thread(target=keep_alive, daemon=True).start()
-
-BOT_TOKEN = "9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
-CHAT_ID = "6716644289"
-
-print("BOT_TOKEN set?", "YES" if BOT_TOKEN != "PASTE_YOUR_BOT_TOKEN_HERE" and len(BOT_TOKEN) > 10 else "NO - PLEASE PASTE REAL TOKEN", flush=True)
-
+# ============ SYMBOLS ============
+# Yahoo symbols for data
 SYMBOLS = {
-    'GBPJPY': 'GBPJPY=X',
-    'EURUSD': 'EURUSD=X',
-    'GBPUSD': 'GBPUSD=X',
-    'USDJPY': 'USDJPY=X',
-    'XAUUSD': 'GC=F',
-    'EURJPY': 'EURJPY=X',
-    'AUDUSD': 'AUDUSD=X',
-    'USDCAD': 'USDCAD=X',
-    'EURJPY_OTC': 'EURJPY=X',
-    'AEDCNY_OTC': 'AEDCNY=X',
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "GBPJPY": "GBPJPY=X",
+    "USDJPY": "USDJPY=X",
+    "AUDUSD": "AUDUSD=X",
+    "USDCAD": "USDCAD=X",
+    "XAUUSD": "GC=F",
+    "EURJPY": "EURJPY=X",
+    "USDCHF": "USDCHF=X",
+    # OTC - Weekend pairs (use real underlying as proxy)
+    "EURJPY_OTC": "EURJPY=X",
+    "AEDCNY_OTC": "CNY=X",
+    "USDJPY_OTC": "USDJPY=X",
+    "EURUSD_OTC": "EURUSD=X",
+}
+
+DISPLAY = {
+    "EURUSD": "EUR/USD",
+    "GBPUSD": "GBP/USD",
+    "GBPJPY": "GBP/JPY",
+    "USDJPY": "USD/JPY",
+    "AUDUSD": "AUD/USD",
+    "USDCAD": "USD/CAD",
+    "XAUUSD": "GOLD",
+    "EURJPY": "EUR/JPY",
+    "USDCHF": "USD/CHF",
+    "EURJPY_OTC": "EUR/JPY OTC",
+    "AEDCNY_OTC": "AED/CNY OTC",
+    "USDJPY_OTC": "USD/JPY OTC",
+    "EURUSD_OTC": "EUR/USD OTC",
 }
 
 def display_name(sym):
-    if sym == 'XAUUSD':
-        return 'XAU/USD'
-    if sym == 'EURJPY_OTC':
-        return 'EUR/JPY OTC'
-    if sym == 'AEDCNY_OTC':
-        return 'AED/CNY OTC'
-    return f"{sym[:3]}/{sym[3:]}"
+    return DISPLAY.get(sym, sym)
 
-def tf_label(tf):
-    if tf == "5m":
-        return "5min"
-    if tf == "1m":
-        return "1min"
-    if tf == "30m":
-        return "30min"
-    if tf == "1h":
-        return "1 Hour"
-    return tf
+# ============ 24/7 SETTINGS - 2 PAIRS ============
+WEEKDAY_PAIRS = ["EURUSD", "GBPJPY"]  # Mon-Fri
+WEEKEND_PAIRS = ["EURJPY_OTC", "AEDCNY_OTC"]  # Sat-Sun OTC
+AUTO_247 = set()  # chat_ids with auto ON
+LAST_SENT_247 = {}
 
-def telegram_send(chat_id, message, buttons=None):
+# ============ TELEGRAM HELPERS ============
+def telegram_send(chat_id, text, reply_markup=None):
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        data_dict = {'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'}
-        if buttons:
-            keyboard = []
-            row = []
-            for txt, cb in buttons:
-                row.append({"text": txt, "callback_data": cb})
-                if len(row) == 2:
-                    keyboard.append(row)
-                    row = []
-            if row:
-                keyboard.append(row)
-            data_dict['reply_markup'] = json.dumps({"inline_keyboard": keyboard})
-        data = urllib.parse.urlencode(data_dict)
-        req = urllib.request.Request(url, data.encode())
-        with urllib.request.urlopen(req, timeout=10) as r:
-            r.read()
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup)
+        req = urllib.request.Request(
+            BASE + "/sendMessage",
+            data=urllib.parse.urlencode(data).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        urllib.request.urlopen(req, timeout=15)
     except Exception as e:
-        print(f"Send failed: {e}", flush=True)
+        print(f"Send error: {e}", flush=True)
 
-def telegram_answer_callback(callback_id):
+def get_updates(offset):
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
-        data = urllib.parse.urlencode({'callback_query_id': callback_id})
-        req = urllib.request.Request(url, data.encode())
-        with urllib.request.urlopen(req, timeout=10) as r:
-            r.read()
+        url = f"{BASE}/getUpdates?offset={offset}&timeout=20"
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return json.loads(r.read().decode())
     except Exception as e:
-        print(f"Answer callback failed: {e}", flush=True)
+        print(f"GetUpdates error: {e}", flush=True)
+        return {"result": []}
 
-def telegram_updates(offset=None):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?timeout=10"
-    if offset:
-        url += f"&offset={offset}"
-    try:
-        with urllib.request.urlopen(url, timeout=15) as r:
-            data = json.loads(r.read())
-            return data.get("result", [])
-    except Exception as e:
-        print(f"Updates failed: {e}", flush=True)
-        return []
-
+# ============ INDICATORS ============
 def calc_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return 50
-    deltas = closes.diff()
-    gains = deltas.clip(lower=0)
-    losses = -deltas.clip(upper=0)
-    avg_gain = gains.rolling(period).mean()
-    avg_loss = losses.rolling(period).mean()
-    rs = avg_gain / (avg_loss + 0.000001)
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1])
+    try:
+        closes = pd.Series(closes)
+        delta = closes.diff()
+        gain = delta.where(delta > 0, 0).rolling(period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        val = float(rsi.iloc[-1])
+        if np.isnan(val):
+            return 50.0
+        return val
+    except:
+        return 50.0
 
 def detect_pattern(df):
     try:
-        o2, c2 = float(df['Open'].iloc[-4]), float(df['Close'].iloc[-4])
-        h2, l2 = float(df['High'].iloc[-4]), float(df['Low'].iloc[-4])
-        o1, c1 = float(df['Open'].iloc[-3]), float(df['Close'].iloc[-3])
-        h1, l1 = float(df['High'].iloc[-3]), float(df['Low'].iloc[-3])
-        o0, c0 = float(df['Open'].iloc[-2]), float(df['Close'].iloc[-2])
-        h0, l0 = float(df['High'].iloc[-2]), float(df['Low'].iloc[-2])
-    except Exception:
-        return "None", "NONE"
-    def body(o,c): return abs(c-o)
-    def is_green(o,c): return c > o
-    def is_red(o,c): return c < o
-    def is_doji(o,c,h,l):
-        rng = h - l + 0.000001
-        return body(o,c) / rng < 0.15
-    def is_hammer(o,c,h,l):
-        rng = h - l + 0.000001
-        lower_wick = min(o,c) - l
-        upper_wick = h - max(o,c)
-        return lower_wick > body(o,c)*2 and lower_wick > rng*0.55 and upper_wick < body(o,c)*0.5
-    def is_shooting(o,c,h,l):
-        rng = h - l + 0.000001
-        upper_wick = h - max(o,c)
-        lower_wick = min(o,c) - l
-        return upper_wick > body(o,c)*2 and upper_wick > rng*0.55 and lower_wick < body(o,c)*0.5
-    if is_doji(o0,c0,h0,l0):
-        return "Doji - Confused", "WAIT"
-    if is_red(o2,c2) and body(o1,c1) < body(o2,c2)*0.4 and is_green(o0,c0) and c0 > (o2+c2)/2:
-        return "Morning Star ⭐", "BUY"
-    if is_green(o2,c2) and body(o1,c1) < body(o2,c2)*0.4 and is_red(o0,c0) and c0 < (o2+c2)/2:
-        return "Evening Star ⭐", "SELL"
-    if is_red(o1,c1) and is_green(o0,c0) and c0 > o1 and o0 < c1:
-        return "Bullish Engulfing 🟢", "BUY"
-    if is_green(o1,c1) and is_red(o0,c0) and c0 < o1 and o0 > c1:
-        return "Bearish Engulfing 🔴", "SELL"
-    if is_hammer(o0,c0,h0,l0) and is_red(o1,c1):
-        return "Hammer 🔨", "BUY"
-    if is_shooting(o0,c0,h0,l0) and is_green(o1,c1):
-        return "Shooting Star / Pin Bar Top 📌", "SELL"
-    if is_hammer(o0,c0,h0,l0) and is_green(o0,c0):
-        return "Pin Bar Bottom 📌", "BUY"
-    if is_shooting(o0,c0,h0,l0) and is_red(o0,c0):
-        return "Pin Bar Top 📌", "SELL"
-    if is_green(o2,c2) and is_green(o1,c1) and is_green(o0,c0):
-        return "3 Green - Too Late", "WAIT"
-    if is_red(o2,c2) and is_red(o1,c1) and is_red(o0,c0):
-        return "3 Red - Too Late", "WAIT"
-    return "No Pattern - Pullback Only", "PULLBACK"
+        # Use last closed candle (iloc[-2]) and previous (iloc[-3])
+        o = float(df['Open'].iloc[-2]); c = float(df['Close'].iloc[-2])
+        h = float(df['High'].iloc[-2]); l = float(df['Low'].iloc[-2])
+        prev_o = float(df['Open'].iloc[-3]); prev_c = float(df['Close'].iloc[-3])
+        body = abs(c - o)
+        upper = h - max(o, c)
+        lower = min(o, c) - l
+        total = h - l
+        if total == 0:
+            return "No Pattern", None
 
-def check_pair(symbol, yahoo_symbol, timeframe="5m"):
+        # Hammer - bullish
+        if lower > body * 2 and upper < body * 0.5 and c < o:
+            return "Hammer 🔨", "BUY"
+        # Shooting Star - bearish
+        if upper > body * 2 and lower < body * 0.5 and c > o:
+            return "Shooting Star ⭐", "SELL"
+        # Bullish Engulfing
+        if prev_c < prev_o and c > o and c > prev_o and o < prev_c:
+            return "Bullish Engulfing 🟢", "BUY"
+        # Bearish Engulfing
+        if prev_c > prev_o and c < o and c < prev_o and o > prev_c:
+            return "Bearish Engulfing 🔴", "SELL"
+        # Doji
+        if body < total * 0.1:
+            return "Doji ➖", None
+        # Marubozu
+        if body > total * 0.9:
+            return ("Bullish Marubozu", "BUY") if c > o else ("Bearish Marubozu", "SELL")
+        return "No Pattern", None
+    except:
+        return "No Pattern", None
+
+# ============ PREDICT NEXT 1-MIN CANDLE ============
+def predict_next_1m(symbol, yahoo_symbol):
     try:
-        if timeframe == "1h":
-            period = "5d"
-            interval = "1h"
-        elif timeframe == "30m":
-            period = "5d"
-            interval = "30m"
-        elif timeframe == "5m":
-            period = "1d"
-            interval = "5m"
-        else:
-            period = "1d"
-            interval = "1m"
-        df = yf.download(yahoo_symbol, period=period, interval=interval, progress=False)
+        df = yf.download(yahoo_symbol, period="1d", interval="1m", progress=False)
         if df is None or len(df) < 70:
-            return (symbol, "FLAT", f"{display_name(symbol)}: No data", "LOW")
+            return None
         try:
             df.columns = df.columns.droplevel(1)
-        except Exception:
+        except:
             pass
         df['ma'] = df['Close'].rolling(50).mean()
         closes = df['Close']
-        curr_close = float(closes.iloc[-2])
-        prev_close = float(closes.iloc[-3])
-        prev_open = float(df['Open'].iloc[-3])
-        curr_ma = float(df['ma'].iloc[-2])
-        ma_now = float(df['ma'].iloc[-2])
-        ma_before = float(df['ma'].iloc[-5])
         rsi = calc_rsi(closes)
+
+        o = float(df['Open'].iloc[-2]); c = float(df['Close'].iloc[-2])
+        ma = float(df['ma'].iloc[-2])
+        prev_o = float(df['Open'].iloc[-3]); prev_c = float(df['Close'].iloc[-3])
+
         pattern_name, pattern_dir = detect_pattern(df)
-        def candle_color(o, c):
-            return 1 if c > o else -1
-        last3 = [candle_color(float(df['Open'].iloc[-2-i]), float(df['Close'].iloc[-2-i])) for i in range(3)]
-        last5 = [candle_color(float(df['Open'].iloc[-2-i]), float(df['Close'].iloc[-2-i])) for i in range(5)]
-        label = tf_label(timeframe)
         name = display_name(symbol)
-        is_otc = "_OTC" in symbol
-        otc_note = "\n⚠️ OTC Proxy - Check Quotex chart" if is_otc else ""
-        if pattern_dir == "WAIT":
-            return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nPattern: {pattern_name}\nRSI: {rsi:.0f} ❌\nDon't trade - {pattern_name}{otc_note}", "LOW")
-        if last3[0] == last3[1] == last3[2] and pattern_dir == "PULLBACK":
-            return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nReason: 3 same candles - Don't chase ❌\nRSI: {rsi:.0f}{otc_note}", "LOW")
-        if last5 == [1,-1,1,-1,1] or last5 == [-1,1,-1,1,-1]:
-            return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nReason: Choppy - zig zag ❌\nRSI: {rsi:.0f}{otc_note}", "LOW")
-        dist = abs(curr_close - curr_ma) / (curr_close + 0.000001) * 100
-        if dist > 0.35:
-            return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nReason: Too far from MA50 ({dist:.2f}%) ❌\nRSI: {rsi:.0f}{otc_note}", "LOW")
-        if curr_close > curr_ma and ma_now > ma_before:
-            pullback_ok = prev_close < prev_open
-            if rsi > 45 and (pattern_dir == "BUY" or (pattern_dir == "PULLBACK" and pullback_ok)):
-                conf = "HIGH" if pattern_dir == "BUY" and rsi > 50 else "MEDIUM"
-                return (symbol, "UP", f"⬆️ <b>{name} : UP - {label}</b>\n\nPrice: {curr_close:.5f}\nAbove MA50, MA UP\nPattern: {pattern_name}\nRSI: {rsi:.0f}\nConfidence: {conf} ✅{otc_note}\n\nTake BUY for {label} ✅", conf)
-            return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nReason: Above MA50 but Pattern: {pattern_name} / RSI {rsi:.0f} ❌{otc_note}", "LOW")
-        if curr_close < curr_ma and ma_now < ma_before:
-            pullback_ok = prev_close > prev_open
-            if rsi < 55 and (pattern_dir == "SELL" or (pattern_dir == "PULLBACK" and pullback_ok)):
-                conf = "HIGH" if pattern_dir == "SELL" and rsi < 50 else "MEDIUM"
-                return (symbol, "DOWN", f"⬇️ <b>{name} : DOWN - {label}</b>\n\nPrice: {curr_close:.5f}\nBelow MA50, MA DOWN\nPattern: {pattern_name}\nRSI: {rsi:.0f}\nConfidence: {conf} ✅{otc_note}\n\nTake SELL for {label} ✅", conf)
-            return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nReason: Below MA50 but Pattern: {pattern_name} / RSI {rsi:.0f} ❌{otc_note}", "LOW")
-        return (symbol, "FLAT", f"⚪ <b>{name} : WAIT - {label}</b>\n\nPrice: {curr_close:.5f}\nMA flat\nPattern: {pattern_name}\nRSI: {rsi:.0f}{otc_note}\n\nDon't trade ❌", "LOW")
+
+        # 1. REVERSAL UP
+        if c < o and pattern_dir == "BUY" and rsi < 55:
+            return f"⬆️ <b>{name} : NEXT CANDLE UP</b>\nPattern: {pattern_name}\nRSI: {rsi:.0f}\nPrice: {c:.5f}\n\n👉 BUY - 1 min expiry ✅"
+        # 2. REVERSAL DOWN
+        if c > o and pattern_dir == "SELL" and rsi > 45:
+            return f"⬇️ <b>{name} : NEXT CANDLE DOWN</b>\nPattern: {pattern_name}\nRSI: {rsi:.0f}\nPrice: {c:.5f}\n\n👉 SELL - 1 min expiry ✅"
+        # 3. PULLBACK UP
+        if c > ma and prev_c < prev_o and c > o and 50 < rsi < 70:
+            return f"⬆️ <b>{name} : NEXT CANDLE UP</b>\nAbove MA50, pullback done\nRSI: {rsi:.0f}\n\n👉 BUY ✅"
+        # 4. PULLBACK DOWN
+        if c < ma and prev_c > prev_o and c < o and 30 < rsi < 50:
+            return f"⬇️ <b>{name} : NEXT CANDLE DOWN</b>\nBelow MA50, pullback done\nRSI: {rsi:.0f}\n\n👉 SELL ✅"
+        # 5. MOMENTUM UP - 2 greens
+        if c > o and prev_c > prev_o and c > ma and 55 < rsi < 75:
+            return f"⬆️ <b>{name} : NEXT CANDLE UP</b>\nMomentum: 2 GREEN\nRSI: {rsi:.0f}\n\n👉 BUY ✅"
+        # 6. MOMENTUM DOWN - 2 reds
+        if c < o and prev_c < prev_o and c < ma and 25 < rsi < 45:
+            return f"⬇️ <b>{name} : NEXT CANDLE DOWN</b>\nMomentum: 2 RED\nRSI: {rsi:.0f}\n\n👉 SELL ✅"
+        return None
     except Exception as e:
-        print(f"Check error {symbol}: {e}", flush=True)
-        traceback.print_exc()
-        return (symbol, "ERROR", f"{display_name(symbol)}: Error", "LOW")
+        print(f"Predict error {symbol}: {e}", flush=True)
+        return None
 
-def timeframe_buttons():
-    return [("✅ 5min", "TF_5m"), ("1min", "TF_1m"), ("30min 🕧", "TF_30m"), ("1 Hour 🕐", "TF_1h")]
+def get_active_pairs():
+    lagos = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))
+    weekday = lagos.weekday()  # 0=Mon, 5=Sat, 6=Sun
+    if weekday >= 5:
+        return WEEKEND_PAIRS
+    return WEEKDAY_PAIRS
 
-def pair_buttons(timeframe):
-    btns = []
-    for sym in SYMBOLS.keys():
-        btns.append((f"{display_name(sym)}", f"{timeframe}_{sym}"))
-    btns.append((f"📊 ALL - {timeframe}", f"{timeframe}_ALL"))
-    btns.append((f"🔥 STRONG - {timeframe}", f"{timeframe}_STRONG"))
-    btns.append(("⬅️ Change Time", "BACK_TF"))
-    return btns
-
-def send_timeframe_menu(chat_id):
-    msg = "<b>🔥 Welcome to IB BOT V3.1 FIXED 🕯️</b>\n\n<b>MA50 + RSI + Candlestick + OTC</b>\n\nChoose your minutes 👇\n\n<b>We recommend 5min</b> - slower and safer."
-    telegram_send(chat_id, msg, buttons=timeframe_buttons())
-
-def send_pair_menu(chat_id, timeframe):
-    label = tf_label(timeframe)
-    msg = f"<b>⏰ Time: {label} ✅</b>\n\nChoose a pair below 👇"
-    telegram_send(chat_id, msg, buttons=pair_buttons(timeframe))
-
-def main():
-    print("IB BOT V3.1 FIXED - Running...", flush=True)
-    # Safe start message - will not crash if token is wrong
-    try:
-        if BOT_TOKEN != "PASTE_YOUR_BOT_TOKEN_HERE":
-            telegram_send(CHAT_ID, "✅ <b>IB BOT V3.1 FIXED Started</b>\nSend /start to see buttons.")
-        else:
-            print("Skipping start message - token not set yet", flush=True)
-    except Exception as e:
-        print(f"Start message failed (not fatal): {e}", flush=True)
-    offset = None
+# ============ AUTO 24/7 LOOP ============
+def auto_247_loop():
+    print("🤖 AUTO 24/7 LOOP STARTED - 2 PAIRS 1 MIN", flush=True)
     while True:
         try:
-            updates = telegram_updates(offset)
-            for upd in updates:
-                offset = upd["update_id"] + 1
-                if "callback_query" in upd:
-                    cb = upd["callback_query"]
-                    telegram_answer_callback(cb["id"])
+            now_minute = int(time.time() // 60)
+            lagos = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))
+            time_str = lagos.strftime("%I:%M%p")
+            active_pairs = get_active_pairs()
+            for chat_id in list(AUTO_247):
+                for sym in active_pairs:
+                    key = f"{chat_id}_{sym}"
+                    if LAST_SENT_247.get(key) == now_minute:
+                        continue
+                    LAST_SENT_247[key] = now_minute
+                    signal = predict_next_1m(sym, SYMBOLS[sym])
+                    if signal:
+                        telegram_send(chat_id, f"⏰ <b>{time_str} - 1 MIN - 24/7</b>\n\n" + signal)
+            time.sleep(10)
+        except Exception as e:
+            print(f"247 loop error: {e}", flush=True)
+            time.sleep(10)
+
+threading.Thread(target=auto_247_loop, daemon=True).start()
+
+# ============ MANUAL CHECK (OLD) ============
+def check_pair(symbol, timeframe="5m"):
+    try:
+        yahoo_symbol = SYMBOLS[symbol]
+        interval = "5m" if timeframe == "5m" else "1m" if timeframe == "1m" else "30m"
+        period = "1d" if interval in ["1m", "5m"] else "5d"
+        df = yf.download(yahoo_symbol, period=period, interval=interval, progress=False)
+        if df is None or len(df) < 70:
+            return "⚠️ Not enough data. Try again."
+        try:
+            df.columns = df.columns.droplevel(1)
+        except:
+            pass
+        df['ma'] = df['Close'].rolling(50).mean()
+        rsi = calc_rsi(df['Close'])
+        o = float(df['Open'].iloc[-2]); c = float(df['Close'].iloc[-2])
+        ma = float(df['ma'].iloc[-2])
+        pattern_name, pattern_dir = detect_pattern(df)
+        name = display_name(symbol)
+        if pattern_dir == "BUY" and rsi < 60 and c > ma:
+            return f"⬆️ <b>{name} : BUY</b>\nPattern: {pattern_name}\nRSI: {rsi:.0f}\nPrice: {c:.5f}\nMA50: {ma:.5f}"
+        if pattern_dir == "SELL" and rsi > 40 and c < ma:
+            return f"⬇️ <b>{name} : SELL</b>\nPattern: {pattern_name}\nRSI: {rsi:.0f}\nPrice: {c:.5f}\nMA50: {ma:.5f}"
+        if c > ma and rsi > 50:
+            return f"⬆️ <b>{name} : BUY (Trend)</b>\nRSI: {rsi:.0f}\nPrice: {c:.5f}\nPattern: {pattern_name}"
+        if c < ma and rsi < 50:
+            return f"⬇️ <b>{name} : SELL (Trend)</b>\nRSI: {rsi:.0f}\nPrice: {c:.5f}\nPattern: {pattern_name}"
+        return f"⏳ <b>{name} : WAIT</b>\nRSI: {rsi:.0f}\nPrice: {c:.5f}\nPattern: {pattern_name}\n\nNo clear signal. Wait for next candle."
+    except Exception as e:
+        return f"⚠️ Error: {e}"
+
+# ============ MENUS ============
+def main_menu():
+    return {
+        "inline_keyboard": [
+            [{"text": "🤖 AUTO 24/7 ON - 2 PAIRS 1MIN", "callback_data": "AUTO247_ON"}],
+            [{"text": "🛑 AUTO 24/7 OFF", "callback_data": "AUTO247_OFF"}],
+            [{"text": "📊 Manual Check - EUR/USD", "callback_data": "CHECK_EURUSD"}],
+            [{"text": "📊 Manual Check - GBP/JPY", "callback_data": "CHECK_GBPJPY"}],
+            [{"text": "📊 Manual Check - GOLD", "callback_data": "CHECK_XAUUSD"}],
+        ]
+    }
+
+def handle_callback(chat_id, data):
+    if data == "AUTO247_ON":
+        AUTO_247.add(chat_id)
+        telegram_send(chat_id, "🤖 <b>AUTO 24/7 ON ✅</b>\n\n<b>2 Pairs, 1 Min, Non-Stop</b>\n\nMon-Fri: EUR/USD + GBP/JPY\nSat-Sun: EUR/JPY OTC + AED/CNY OTC\n\nYou will get like:\n12:30PM EUR/USD UP ⬆️\n12:30PM GBP/JPY DOWN ⬇️\n\nJust enter and wait 1 min.", main_menu())
+    elif data == "AUTO247_OFF":
+        AUTO_247.discard(chat_id)
+        telegram_send(chat_id, "🛑 AUTO 24/7 OFF", main_menu())
+    elif data.startswith("CHECK_"):
+        sym = data.replace("CHECK_", "")
+        telegram_send(chat_id, "⏳ Checking...")
+        result = check_pair(sym, "5m")
+        telegram_send(chat_id, result, main_menu())
+    else:
+        telegram_send(chat_id, "Choose:", main_menu())
+
+def handle_message(chat_id, text):
+    low = text.lower().strip()
+    if low in ["/start", "start", "hi", "hello"]:
+        telegram_send(chat_id, "👋 <b>Welcome to IB BOT V4 - 24/7</b>\n\n<b>2 Pairs, 1 Min, Next Candle UP/DOWN</b>\n\nPress AUTO 24/7 ON to start getting signals every minute, non-stop.\n\nMon-Fri: EUR/USD + GBP/JPY\nSat-Sun: OTC Pairs\n\nUse /stop to stop.", main_menu())
+    elif low in ["auto on", "auto", "on"]:
+        AUTO_247.add(chat_id)
+        telegram_send(chat_id, "🤖 AUTO 24/7 ON ✅\n\nYou will get signals every minute.", main_menu())
+    elif low in ["/stop", "stop", "off"]:
+        AUTO_247.discard(chat_id)
+        telegram_send(chat_id, "🛑 Stopped.", main_menu())
+    elif low in ["eurusd", "eur/usd"]:
+        telegram_send(chat_id, check_pair("EURUSD", "5m"))
+    elif low in ["gbpjpy", "gbp/jpy"]:
+        telegram_send(chat_id, check_pair("GBPJPY", "5m"))
+    else:
+        telegram_send(chat_id, "Choose:", main_menu())
+
+# ============ MAIN POLLING LOOP ============
+def main():
+    print("IB BOT V4 - 24/7 STARTED", flush=True)
+    offset = 0
+    while True:
+        try:
+            updates = get_updates(offset)
+            for u in updates.get("result", []):
+                offset = u["update_id"] + 1
+                if "callback_query" in u:
+                    cb = u["callback_query"]
                     chat_id = cb["message"]["chat"]["id"]
-                    data = cb["data"]
-                    if data == "TF_5m":
-                        send_pair_menu(chat_id, "5m")
-                    elif data == "TF_1m":
-                        send_pair_menu(chat_id, "1m")
-                    elif data == "TF_30m":
-                        send_pair_menu(chat_id, "30m")
-                    elif data == "TF_1h":
-                        send_pair_menu(chat_id, "1h")
-                    elif data == "BACK_TF":
-                        send_timeframe_menu(chat_id)
-                    elif data.endswith("_ALL"):
-                        tf = data.split("_")[0]
-                        label = tf_label(tf)
-                        results = []
-                        for s, y in SYMBOLS.items():
-                            _, status, txt, _ = check_pair(s, y, tf)
-                            if status == "UP":
-                                results.append(f"⬆️ {display_name(s)} : UP")
-                            elif status == "DOWN":
-                                results.append(f"⬇️ {display_name(s)} : DOWN")
-                            else:
-                                results.append(f"⚪ {display_name(s)} : WAIT")
-                        reply = f"<b>📊 ALL PAIRS - {label}</b>\n\n" + "\n".join(results) + "\n\nChoose again 👇"
-                        telegram_send(chat_id, reply, buttons=pair_buttons(tf))
-                    elif data.endswith("_STRONG"):
-                        tf = data.split("_")[0]
-                        label = tf_label(tf)
-                        strong = []
-                        for s, y in SYMBOLS.items():
-                            _, status, result, conf = check_pair(s, y, tf)
-                            if status in ["UP", "DOWN"] and conf == "HIGH":
-                                strong.append(result)
-                        if strong:
-                            reply = f"<b>🔥 STRONG ONLY - {label} - HIGH CONF ONLY</b>\n\n" + "\n\n".join(strong) + "\n\nChoose again 👇"
-                        else:
-                            reply = f"<b>⚪ No Strong Signal - {label}</b>\n\nAll pairs are WAIT. Don't trade now.\n\nChoose again 👇"
-                        telegram_send(chat_id, reply, buttons=pair_buttons(tf))
-                    elif "_" in data and data.split("_")[0] in ["5m", "1m", "30m", "1h"]:
-                        parts = data.split("_", 1)
-                        tf = parts[0]
-                        sym = parts[1]
-                        if sym in SYMBOLS:
-                            _, _, result, _ = check_pair(sym, SYMBOLS[sym], tf)
-                            reply = result + "\n\nChoose another pair 👇"
-                            telegram_send(chat_id, reply, buttons=pair_buttons(tf))
-                    continue
-                msg = upd.get("message", {})
-                text = msg.get("text", "").strip().lower().replace("/", "")
-                chat_id = msg.get("chat", {}).get("id")
-                if not text or not chat_id:
-                    continue
-                if text in ["start", "help", "hi", "hello", "menu"]:
-                    send_timeframe_menu(chat_id)
-            time.sleep(2)
+                    handle_callback(chat_id, cb["data"])
+                elif "message" in u:
+                    msg = u["message"]
+                    chat_id = msg["chat"]["id"]
+                    text = msg.get("text", "")
+                    if text:
+                        handle_message(chat_id, text)
         except Exception as e:
             print(f"Main loop error: {e}", flush=True)
-            traceback.print_exc()
             time.sleep(5)
 
 if __name__ == "__main__":
