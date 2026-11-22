@@ -70,7 +70,7 @@ def rsi_calc(closes):
     except:
         return 50.0
 
-def dr_predict():
+def dr_predict_strong():
     df = yf.download(YAHOO, period="1d", interval="1m", progress=False)
     if df is None or len(df) < 30:
         return None
@@ -78,7 +78,7 @@ def dr_predict():
         df.columns = df.columns.droplevel(1)
     except:
         pass
-    df["ma"] = df["Close"].rolling(10).mean()
+    df["ma"] = df["Close"].rolling(20).mean()
     rsi = rsi_calc(df["Close"])
     o = df["Open"].iloc[-4:-1].tolist()
     c = df["Close"].iloc[-4:-1].tolist()
@@ -103,54 +103,65 @@ def dr_predict():
     is_red2 = C2 < O2
     ma = float(df["ma"].iloc[-2])
     price = float(C)
-    if is_red and is_red1 and is_red2:
-        return ["SELL", "3 RED in a row - Trend DOWN", price, rsi]
-    if is_green and is_green1 and is_green2:
-        return ["BUY", "3 GREEN in a row - Trend UP", price, rsi]
-    if is_green and is_red1 and C > O1 and O < C1:
-        return ["BUY", "Bullish Engulfing - Reversal UP", price, rsi]
-    if is_red and is_green1 and C < O1 and O > C1:
-        return ["SELL", "Bearish Engulfing - Reversal DOWN", price, rsi]
-    if lower > body * 2 and is_green:
-        return ["BUY", "Hammer at bottom", price, rsi]
-    if upper > body * 2 and is_red:
-        return ["SELL", "Shooting Star at top", price, rsi]
-    if is_green and is_green1 and price > ma:
-        return ["BUY", "2 GREEN + Above MA - Trend UP", price, rsi]
-    if is_red and is_red1 and price < ma:
-        return ["SELL", "2 RED + Below MA - Trend DOWN", price, rsi]
-    if rsi > 72:
-        return ["SELL", "RSI Overbought", price, rsi]
-    if rsi < 28:
-        return ["BUY", "RSI Oversold", price, rsi]
-    if is_green:
-        return ["BUY", "Last candle GREEN - Follow UP", price, rsi]
-    return ["SELL", "Last candle RED - Follow DOWN", price, rsi]
+    # Pattern detection
+    is_hammer = lower > body * 2 and is_green
+    is_shooting = upper > body * 2 and is_red
+    is_bull_engulf = is_green and is_red1 and C > O1 and O < C1
+    is_bear_engulf = is_red and is_green1 and C < O1 and O > C1
+    is_morning = is_red2 and is_green and C > O2
+    is_evening = is_green2 and is_red and C < O2
+    is_bull_pin = lower > body * 1.5 and is_green
+    is_bear_pin = upper > body * 1.5 and is_red
+    # STRONG BUY - Need 3 confirmations
+    bull_pattern = is_hammer or is_bull_engulf or is_morning or is_bull_pin
+    bear_pattern = is_shooting or is_bear_engulf or is_evening or is_bear_pin
+    # BUY: Pattern + RSI low + Price below MA
+    if bull_pattern and rsi < 45 and price < ma:
+        if is_hammer:
+            pat = "Hammer"
+        elif is_bull_engulf:
+            pat = "Bullish Engulfing"
+        elif is_morning:
+            pat = "Morning Star"
+        else:
+            pat = "Bullish Pin Bar"
+        return ["BUY", pat + " + RSI " + str(round(rsi)) + " (low) + Below MA - 3 CONFIRMATIONS", price, rsi]
+    # SELL: Pattern + RSI high + Price above MA
+    if bear_pattern and rsi > 55 and price > ma:
+        if is_shooting:
+            pat = "Shooting Star"
+        elif is_bear_engulf:
+            pat = "Bearish Engulfing"
+        elif is_evening:
+            pat = "Evening Star"
+        else:
+            pat = "Bearish Pin Bar"
+        return ["SELL", pat + " + RSI " + str(round(rsi)) + " (high) + Above MA - 3 CONFIRMATIONS", price, rsi]
+    # EXTRA STRONG: RSI extreme + Pattern
+    if bull_pattern and rsi < 30:
+        return ["BUY", "Pattern + RSI " + str(round(rsi)) + " OVERSOLD - Strong Reversal", price, rsi]
+    if bear_pattern and rsi > 70:
+        return ["SELL", "Pattern + RSI " + str(round(rsi)) + " OVERBOUGHT - Strong Reversal", price, rsi]
+    return None
 
 def loop_dr():
     global LAST_MIN
-    print("DR GBPJPY OTC STARTED", flush=True)
+    print("STRONG MODE STARTED", flush=True)
     while True:
         try:
             now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))
             minute = int(time.time() // 60)
             if now.second < 12 and minute != LAST_MIN:
                 LAST_MIN = minute
-                res = dr_predict()
+                res = dr_predict_strong()
                 if res:
                     direction = res[0]
                     reason = res[1]
                     price = res[2]
                     rsi = res[3]
                     tstr = now.strftime("%I:%M%p")
-                    if direction == "BUY":
-                        arrow = "UP"
-                        emoji = "GREEN"
-                    else:
-                        arrow = "DOWN"
-                        emoji = "RED"
                     for cid in list(AUTO):
-                        msg = "DR CANDLE TRACKER\nNEXT QUANT SIGNAL\n\n" + arrow + " " + PAIR_NAME + "\n" + emoji + " " + direction + " - 1 MIN\n\nReason: " + reason + "\nPrice: " + str(round(price, 5)) + " | RSI: " + str(round(rsi, 0)) + "\nEnter NOW: " + tstr + "\n\nOpen " + direction + " trade now!"
+                        msg = "STRONG SIGNAL - NOT LUCKY\n\n" + direction + " - " + PAIR_NAME + " - 1 MIN\n\nReason: " + reason + "\nPrice: " + str(round(price, 5)) + " | RSI: " + str(round(rsi, 0)) + "\nEnter NOW: " + tstr + "\n\nOpen " + direction + " trade now! - Pocket Option"
                         send(cid, msg)
             time.sleep(3)
         except Exception as e:
@@ -160,13 +171,13 @@ def loop_dr():
 threading.Thread(target=loop_dr, daemon=True).start()
 
 def menu():
-    return {"inline_keyboard": [[{"text": "DR GBP/JPY OTC ON", "callback_data": "ON"}], [{"text": "OFF", "callback_data": "OFF"}]]}
+    return {"inline_keyboard": [[{"text": "STRONG MODE ON", "callback_data": "ON"}], [{"text": "OFF", "callback_data": "OFF"}]]}
 
 def main():
-    print("BOT DR GBPJPY STARTED", flush=True)
+    print("BOT STRONG STARTED", flush=True)
     if MY_CHAT_ID != "YOUR_CHAT_ID_HERE":
         try:
-            send(int(MY_CHAT_ID), "DR Candle Tracker ON. Pair: GBP/JPY (OTC) - 1 MIN - Pocket Option")
+            send(int(MY_CHAT_ID), "STRONG MODE ON. Pair: GBP/JPY (OTC) - 1 MIN - Pocket Option. I will ONLY send when 3 confirmations agree. No more lucky signals.")
         except:
             pass
     off = 0
@@ -180,7 +191,7 @@ def main():
                     cid = cb["message"]["chat"]["id"]
                     if cb["data"] == "ON":
                         AUTO.add(cid)
-                        send(cid, "DR GBP/JPY OTC ON", menu())
+                        send(cid, "STRONG MODE ON", menu())
                     else:
                         AUTO.discard(cid)
                         send(cid, "OFF", menu())
@@ -189,7 +200,7 @@ def main():
                     txt = u["message"]["text"].lower()
                     if txt in ["/start", "start", "hi"]:
                         AUTO.add(cid)
-                        send(cid, "DR CANDLE TRACKER\n\nPair: GBP/JPY (OTC)\nTime: 1 MIN\nFor: Pocket Option", menu())
+                        send(cid, "STRONG MODE\n\nPair: GBP/JPY (OTC)\nTime: 1 MIN\nFor: Pocket Option\n\nI only send when Pattern + RSI + MA agree.", menu())
         except Exception as e:
             print(e, flush=True)
             time.sleep(5)
