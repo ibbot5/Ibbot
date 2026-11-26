@@ -10,7 +10,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-BOT_TOKEN = "9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
+BOT_TOKEN = "
+9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
 MY_CHAT_ID = "6716644289"
 BASE = "https://api.telegram.org/bot" + BOT_TOKEN
 
@@ -71,13 +72,19 @@ def rsi_calc(closes):
         return 50.0
 
 def dr_predict_strong():
-    df = yf.download(YAHOO, period="1d", interval="1m", progress=False)
-    if df is None or len(df) < 30:
+    # Get 5m data and build 10m candles from it
+    df5 = yf.download(YAHOO, period="5d", interval="5m", progress=False)
+    if df5 is None or len(df5) < 60:
         return None
     try:
-        df.columns = df.columns.droplevel(1)
+        df5.columns = df5.columns.droplevel(1)
     except:
         pass
+    # Resample 5m -> 10m
+    df = df5.resample("10min").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
+    if len(df) < 30:
+        return None
+
     df["ma"] = df["Close"].rolling(20).mean()
     rsi = rsi_calc(df["Close"])
     o = df["Open"].iloc[-4:-1].tolist()
@@ -104,20 +111,17 @@ def dr_predict_strong():
     ma = float(df["ma"].iloc[-2])
     price = float(C)
 
-    # --- ORDER BLOCK DETECTION (last 30 candles) ---
+    # --- ORDER BLOCK DETECTION (last 30 candles of 10m) ---
     bullish_ob = None
     bearish_ob = None
-    # Use full df for OB search
     for i in range(2, len(df)-1):
         oi = float(df["Open"].iloc[i])
         ci = float(df["Close"].iloc[i])
         hi = float(df["High"].iloc[i])
         li = float(df["Low"].iloc[i])
         next_c = float(df["Close"].iloc[i+1])
-        # Bullish OB: Red candle, next candle breaks above its high
         if ci < oi and next_c > hi:
             bullish_ob = (li, hi)
-        # Bearish OB: Green candle, next candle breaks below its low
         if ci > oi and next_c < li:
             bearish_ob = (li, hi)
 
@@ -131,7 +135,6 @@ def dr_predict_strong():
         in_bear_ob = True
         ob_text = f"Bearish OB: {bearish_ob[0]:.3f} - {bearish_ob[1]:.3f}"
 
-    # Pattern detection
     is_hammer = lower > body * 2 and is_green
     is_shooting = upper > body * 2 and is_red
     is_bull_engulf = is_green and is_red1 and C > O1 and O < C1
@@ -144,8 +147,7 @@ def dr_predict_strong():
     bull_pattern = is_hammer or is_bull_engulf or is_morning or is_bull_pin
     bear_pattern = is_shooting or is_bear_engulf or is_evening or is_bear_pin
 
-    # --- NEW: ORDER BLOCK + PATTERN + RSI = STRONGEST ---
-    # BUY: In Bullish OB + Bull Pattern + RSI low + Price below MA
+    # BUY: In Bullish OB + Pattern + RSI low + Below MA
     if in_bull_ob and bull_pattern and rsi < 45 and price < ma:
         if is_hammer:
             pat = "Hammer"
@@ -157,7 +159,7 @@ def dr_predict_strong():
             pat = "Bullish Pin Bar"
         return ["BUY", pat + " + ORDER BLOCK + RSI " + str(round(rsi)) + " + Below MA - 4 CONFIRMATIONS | " + ob_text, price, rsi]
 
-    # SELL: In Bearish OB + Bear Pattern + RSI high + Price above MA
+    # SELL: In Bearish OB + Pattern + RSI high + Above MA
     if in_bear_ob and bear_pattern and rsi > 55 and price > ma:
         if is_shooting:
             pat = "Shooting Star"
@@ -169,21 +171,21 @@ def dr_predict_strong():
             pat = "Bearish Pin Bar"
         return ["SELL", pat + " + ORDER BLOCK + RSI " + str(round(rsi)) + " + Above MA - 4 CONFIRMATIONS | " + ob_text, price, rsi]
 
-    # Fallback - keep old logic if OB not touched but RSI extreme
     if bull_pattern and rsi < 30:
-        return ["BUY", "Pattern + RSI " + str(round(rsi)) + " OVERSOLD - Strong Reversal (No OB)", price, rsi]
+        return ["BUY", "Pattern + RSI " + str(round(rsi)) + " OVERSOLD (No OB)", price, rsi]
     if bear_pattern and rsi > 70:
-        return ["SELL", "Pattern + RSI " + str(round(rsi)) + " OVERBOUGHT - Strong Reversal (No OB)", price, rsi]
+        return ["SELL", "Pattern + RSI " + str(round(rsi)) + " OVERBOUGHT (No OB)", price, rsi]
     return None
 
 def loop_dr():
     global LAST_MIN
-    print("STRONG MODE STARTED", flush=True)
+    print("STRONG MODE 10MIN STARTED", flush=True)
     while True:
         try:
             now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))
             minute = int(time.time() // 60)
-            if now.second < 12 and minute != LAST_MIN:
+            # Only check at 10-min boundary: 00, 10, 20, 30, 40, 50
+            if now.second < 12 and minute != LAST_MIN and now.minute % 10 == 0:
                 LAST_MIN = minute
                 res = dr_predict_strong()
                 if res:
@@ -193,7 +195,7 @@ def loop_dr():
                     rsi = res[3]
                     tstr = now.strftime("%I:%M%p")
                     for cid in list(AUTO):
-                        msg = "STRONG SIGNAL - ORDER BLOCK\n\n" + direction + " - " + PAIR_NAME + " - 1 MIN\n\nReason: " + reason + "\nPrice: " + str(round(price, 5)) + " | RSI: " + str(round(rsi, 0)) + "\nEnter NOW: " + tstr + "\n\nOpen " + direction + " trade now! - Pocket Option"
+                        msg = "STRONG SIGNAL - ORDER BLOCK - 10 MIN\n\n" + direction + " - " + PAIR_NAME + " - 10 MIN\n\nReason: " + reason + "\nPrice: " + str(round(price, 5)) + " | RSI: " + str(round(rsi, 0)) + "\nEnter NOW: " + tstr + "\n\nOpen " + direction + " trade now! - Pocket Option"
                         send(cid, msg)
             time.sleep(3)
         except Exception as e:
@@ -206,10 +208,10 @@ def menu():
     return {"inline_keyboard": [[{"text": "STRONG MODE ON", "callback_data": "ON"}], [{"text": "OFF", "callback_data": "OFF"}]]}
 
 def main():
-    print("BOT STRONG STARTED", flush=True)
+    print("BOT STRONG 10MIN STARTED", flush=True)
     if MY_CHAT_ID != "YOUR_CHAT_ID_HERE":
         try:
-            send(int(MY_CHAT_ID), "ORDER BLOCK MODE ON. Pair: GBP/JPY (OTC) - 1 MIN - Pocket Option. I will ONLY send when Order Block + Pattern + RSI + MA agree.")
+            send(int(MY_CHAT_ID), "ORDER BLOCK MODE ON - 10 MIN. Pair: GBP/JPY (OTC) - 10 MIN - Pocket Option. I will ONLY send when Order Block + Pattern + RSI + MA agree.")
         except:
             pass
     off = 0
@@ -223,7 +225,7 @@ def main():
                     cid = cb["message"]["chat"]["id"]
                     if cb["data"] == "ON":
                         AUTO.add(cid)
-                        send(cid, "STRONG MODE ON", menu())
+                        send(cid, "STRONG MODE ON - 10 MIN", menu())
                     else:
                         AUTO.discard(cid)
                         send(cid, "OFF", menu())
@@ -232,7 +234,7 @@ def main():
                     txt = u["message"]["text"].lower()
                     if txt in ["/start", "start", "hi"]:
                         AUTO.add(cid)
-                        send(cid, "STRONG MODE - ORDER BLOCK\n\nPair: GBP/JPY (OTC)\nTime: 1 MIN\nFor: Pocket Option\n\nI only send when Order Block + Pattern + RSI + MA agree.", menu())
+                        send(cid, "STRONG MODE - ORDER BLOCK - 10 MIN\n\nPair: GBP/JPY (OTC)\nTime: 10 MIN\nFor: Pocket Option\n\nI only send when Order Block + Pattern + RSI + MA agree.", menu())
         except Exception as e:
             print(e, flush=True)
             time.sleep(5)
