@@ -10,8 +10,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-BOT_TOKEN = "
-9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
+BOT_TOKEN = "9062675637:AAEEAVM0DU3by2Q2gpq5kL1QQm62AnRDo6g"
 MY_CHAT_ID = "6716644289"
 BASE = "https://api.telegram.org/bot" + BOT_TOKEN
 
