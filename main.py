@@ -103,6 +103,34 @@ def dr_predict_strong():
     is_red2 = C2 < O2
     ma = float(df["ma"].iloc[-2])
     price = float(C)
+
+    # --- ORDER BLOCK DETECTION (last 30 candles) ---
+    bullish_ob = None
+    bearish_ob = None
+    # Use full df for OB search
+    for i in range(2, len(df)-1):
+        oi = float(df["Open"].iloc[i])
+        ci = float(df["Close"].iloc[i])
+        hi = float(df["High"].iloc[i])
+        li = float(df["Low"].iloc[i])
+        next_c = float(df["Close"].iloc[i+1])
+        # Bullish OB: Red candle, next candle breaks above its high
+        if ci < oi and next_c > hi:
+            bullish_ob = (li, hi)
+        # Bearish OB: Green candle, next candle breaks below its low
+        if ci > oi and next_c < li:
+            bearish_ob = (li, hi)
+
+    in_bull_ob = False
+    in_bear_ob = False
+    ob_text = ""
+    if bullish_ob and bullish_ob[0] <= price <= bullish_ob[1]:
+        in_bull_ob = True
+        ob_text = f"Bullish OB: {bullish_ob[0]:.3f} - {bullish_ob[1]:.3f}"
+    if bearish_ob and bearish_ob[0] <= price <= bearish_ob[1]:
+        in_bear_ob = True
+        ob_text = f"Bearish OB: {bearish_ob[0]:.3f} - {bearish_ob[1]:.3f}"
+
     # Pattern detection
     is_hammer = lower > body * 2 and is_green
     is_shooting = upper > body * 2 and is_red
@@ -112,11 +140,13 @@ def dr_predict_strong():
     is_evening = is_green2 and is_red and C < O2
     is_bull_pin = lower > body * 1.5 and is_green
     is_bear_pin = upper > body * 1.5 and is_red
-    # STRONG BUY - Need 3 confirmations
+
     bull_pattern = is_hammer or is_bull_engulf or is_morning or is_bull_pin
     bear_pattern = is_shooting or is_bear_engulf or is_evening or is_bear_pin
-    # BUY: Pattern + RSI low + Price below MA
-    if bull_pattern and rsi < 45 and price < ma:
+
+    # --- NEW: ORDER BLOCK + PATTERN + RSI = STRONGEST ---
+    # BUY: In Bullish OB + Bull Pattern + RSI low + Price below MA
+    if in_bull_ob and bull_pattern and rsi < 45 and price < ma:
         if is_hammer:
             pat = "Hammer"
         elif is_bull_engulf:
@@ -125,9 +155,10 @@ def dr_predict_strong():
             pat = "Morning Star"
         else:
             pat = "Bullish Pin Bar"
-        return ["BUY", pat + " + RSI " + str(round(rsi)) + " (low) + Below MA - 3 CONFIRMATIONS", price, rsi]
-    # SELL: Pattern + RSI high + Price above MA
-    if bear_pattern and rsi > 55 and price > ma:
+        return ["BUY", pat + " + ORDER BLOCK + RSI " + str(round(rsi)) + " + Below MA - 4 CONFIRMATIONS | " + ob_text, price, rsi]
+
+    # SELL: In Bearish OB + Bear Pattern + RSI high + Price above MA
+    if in_bear_ob and bear_pattern and rsi > 55 and price > ma:
         if is_shooting:
             pat = "Shooting Star"
         elif is_bear_engulf:
@@ -136,12 +167,13 @@ def dr_predict_strong():
             pat = "Evening Star"
         else:
             pat = "Bearish Pin Bar"
-        return ["SELL", pat + " + RSI " + str(round(rsi)) + " (high) + Above MA - 3 CONFIRMATIONS", price, rsi]
-    # EXTRA STRONG: RSI extreme + Pattern
+        return ["SELL", pat + " + ORDER BLOCK + RSI " + str(round(rsi)) + " + Above MA - 4 CONFIRMATIONS | " + ob_text, price, rsi]
+
+    # Fallback - keep old logic if OB not touched but RSI extreme
     if bull_pattern and rsi < 30:
-        return ["BUY", "Pattern + RSI " + str(round(rsi)) + " OVERSOLD - Strong Reversal", price, rsi]
+        return ["BUY", "Pattern + RSI " + str(round(rsi)) + " OVERSOLD - Strong Reversal (No OB)", price, rsi]
     if bear_pattern and rsi > 70:
-        return ["SELL", "Pattern + RSI " + str(round(rsi)) + " OVERBOUGHT - Strong Reversal", price, rsi]
+        return ["SELL", "Pattern + RSI " + str(round(rsi)) + " OVERBOUGHT - Strong Reversal (No OB)", price, rsi]
     return None
 
 def loop_dr():
@@ -161,7 +193,7 @@ def loop_dr():
                     rsi = res[3]
                     tstr = now.strftime("%I:%M%p")
                     for cid in list(AUTO):
-                        msg = "STRONG SIGNAL - NOT LUCKY\n\n" + direction + " - " + PAIR_NAME + " - 1 MIN\n\nReason: " + reason + "\nPrice: " + str(round(price, 5)) + " | RSI: " + str(round(rsi, 0)) + "\nEnter NOW: " + tstr + "\n\nOpen " + direction + " trade now! - Pocket Option"
+                        msg = "STRONG SIGNAL - ORDER BLOCK\n\n" + direction + " - " + PAIR_NAME + " - 1 MIN\n\nReason: " + reason + "\nPrice: " + str(round(price, 5)) + " | RSI: " + str(round(rsi, 0)) + "\nEnter NOW: " + tstr + "\n\nOpen " + direction + " trade now! - Pocket Option"
                         send(cid, msg)
             time.sleep(3)
         except Exception as e:
@@ -177,7 +209,7 @@ def main():
     print("BOT STRONG STARTED", flush=True)
     if MY_CHAT_ID != "YOUR_CHAT_ID_HERE":
         try:
-            send(int(MY_CHAT_ID), "STRONG MODE ON. Pair: GBP/JPY (OTC) - 1 MIN - Pocket Option. I will ONLY send when 3 confirmations agree. No more lucky signals.")
+            send(int(MY_CHAT_ID), "ORDER BLOCK MODE ON. Pair: GBP/JPY (OTC) - 1 MIN - Pocket Option. I will ONLY send when Order Block + Pattern + RSI + MA agree.")
         except:
             pass
     off = 0
@@ -200,7 +232,7 @@ def main():
                     txt = u["message"]["text"].lower()
                     if txt in ["/start", "start", "hi"]:
                         AUTO.add(cid)
-                        send(cid, "STRONG MODE\n\nPair: GBP/JPY (OTC)\nTime: 1 MIN\nFor: Pocket Option\n\nI only send when Pattern + RSI + MA agree.", menu())
+                        send(cid, "STRONG MODE - ORDER BLOCK\n\nPair: GBP/JPY (OTC)\nTime: 1 MIN\nFor: Pocket Option\n\nI only send when Order Block + Pattern + RSI + MA agree.", menu())
         except Exception as e:
             print(e, flush=True)
             time.sleep(5)
